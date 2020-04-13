@@ -2,11 +2,15 @@ rm(list=ls())
 library(tidyverse)
 library(jsonlite)
 library(lubridate)
+library(zcta)
+library(zipzcta)
 
+# load all the day files
 day_files <- list.files(
     "COVID-19/csse_covid_19_data/csse_covid_19_daily_reports",
     full.names = TRUE, pattern = "*.csv")
 
+# function for cleaning up bad dates
 convert_all_dates <- function(Date){
     # dates are usually space seperated and one of these two formats
     funs <- c("mdy","ymd")
@@ -22,17 +26,18 @@ convert_all_dates <- function(Date){
     round_date(dates, unit = "days")
 }
 
-
-zctacounty <-  zcta::zcta_county_rel_10 %>%
+# code for zip codes to county
+zctacounty <-  zcta_county_rel_10 %>%
     select(zcta = zcta5, geoid, poppt, zpoppct) %>%
     mutate(geoid = sprintf("%05d", geoid)) %>%
     group_by(zcta) %>%
     filter(zpoppct == max(zpoppct)) %>%
     ungroup() %>%
-    right_join(zipzcta::zipzcta) %>%
+    right_join(zipzcta) %>%
     filter(state == "WA") %>%
     select(zip, geoid)
 
+# read facility data and aggregate to county
 facilityDF <- read_json(
     "Health Scrape/facility.json", simplifyVector = T) %>%
     sapply(unlist) %>%
@@ -41,8 +46,10 @@ facilityDF <- read_json(
     left_join(zctacounty, by = "zip") %>%
     group_by(geoid) %>%
     summarize(`Facility Count` = n()) %>%
-    rename(FIPS = geoid)
+    rename(FIPS = geoid) %>%
+    filter(!is.na(FIPS))
 
+# pull in JH covid data
 DF <- day_files %>%
     str_split("/", simplify = TRUE) %>%
     .[,4] %>%
@@ -56,6 +63,8 @@ DF <- day_files %>%
     mutate(Last_Update = convert_all_dates(Last_Update)) %>%
     arrange(Province_State, Admin2, Last_Update) %>%
     filter(Province_State == "Washington") %>%
-    left_join(facilityDF, by = "FIPS")
+    left_join(facilityDF, by = "FIPS") %>%
+    # clean up walla walla
+    filter(Admin2 != "Walla Walla County")
 
 write_csv(DF, "./Health Scrape/covid_county_facility.csv")
