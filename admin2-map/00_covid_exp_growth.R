@@ -41,7 +41,9 @@ DF <- day_files %>%
     mutate(Last_Update = str_split(Last_Update, " ", simplify = TRUE)[,1]) %>%
     filter(Country_Region == "US") %>%
     mutate(Last_Update = convert_all_dates(Last_Update)) %>%
-    arrange(Province_State, Admin2, Last_Update)
+    arrange(Province_State, Admin2, Last_Update) %>%
+    # apparently string length of GEOID is variable now
+    mutate(FIPS = ifelse(str_length(FIPS) == 4, paste0("0", FIPS), FIPS))
 
 
 # Basic exponential curve fitting code
@@ -77,7 +79,7 @@ anlyzDF <- DF %>%
         "<br>Deaths: ", Deaths,
         "<br>Recovered: ", Recovered)) %>%
     filter(dt_hat<=30) %>%
-    rename(GEOID =  FIPS) %>%
+    rename(GEOID = FIPS) %>%
     mutate(
         alpha =case_when(
             Confirmed < 500 ~ .3,
@@ -119,6 +121,7 @@ for(j in unique(anlyzDF$Combined_Key)){
             aes(x=xpos,y=ypos,label=annotateText,
                 vjust=vjustvar, hjust=hjustvar)) +
         labs(x="Date", "Cases") +
+        scale_y_log10() +
         theme(
             legend.text = element_text(size=13),
             legend.title = element_text(size=15),
