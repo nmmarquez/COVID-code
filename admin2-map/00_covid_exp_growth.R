@@ -1,4 +1,5 @@
 rm(list=ls())
+library(MASS)
 library(tidyverse)
 library(leaflet)
 library(lubridate)
@@ -69,8 +70,15 @@ countyDF <- counties(class = "sf") %>%
 anlyzDF <- DF %>%
     group_by(Province_State, Admin2) %>%
     filter(any(Confirmed > 100) & Confirmed > 50 & (n() > 3)) %>%
-    mutate(dt_hat = exp(optim(c(0, 0), exp_days, y=Confirmed)$par[2])) %>%
-    mutate(day_hat = exp(optim(c(0, 0), exp_days, y=Confirmed)$par[1])) %>%
+    filter(!is.na(FIPS) & Admin2 != "Unassigned") %>%
+    mutate(New_Cases = Confirmed - lag(Confirmed)) %>%
+    mutate(Prev_Day_Cases = lag(Confirmed)) %>%
+    mutate(New_Cases = ifelse(New_Cases < 0, NA, New_Cases)) %>%
+    mutate(model = list(glm.nb(New_Cases ~ 1 + offset(log(Prev_Day_Cases))))) %>%
+    mutate(pct_inc = exp(summary(model[[1]])$coefficients[1,1])) %>%
+    mutate(dt_st_err = summary(model[[1]])$coefficients[1,2]) %>%
+    mutate(dt_hat = log(2)/log(1+pct_inc)) %>%
+    mutate(theta = summary(model[[1]])$theta) %>%
     filter(Last_Update == max(Last_Update)) %>%
     mutate(Notes = paste0(
         "Location: ", Combined_Key,
@@ -78,7 +86,7 @@ anlyzDF <- DF %>%
         " days<br>Confirmed: ", Confirmed,
         "<br>Deaths: ", Deaths,
         "<br>Recovered: ", Recovered)) %>%
-    filter(dt_hat<=30) %>%
+    filter(dt_hat<30) %>%
     rename(GEOID = FIPS) %>%
     mutate(
         alpha =case_when(
@@ -87,27 +95,48 @@ anlyzDF <- DF %>%
             TRUE ~ .9),
         fp = paste0("admin2-map/plots/", Combined_Key, ".png"))
 
+sims <- 1000
+
 ### Make plots for popup
 for(j in unique(anlyzDF$Combined_Key)){
+    
     tmpDF <- DF %>%
         filter(Combined_Key == j) %>%
         select(Admin2, Province_State, Last_Update, Confirmed) %>%
-        left_join(select(anlyzDF, -Last_Update, -Confirmed)) %>%
+        mutate(Prev_Day_Cases = lag(Confirmed)) %>%
+        left_join(select(anlyzDF, -Last_Update, -Confirmed, Prev_Day_Cases)) %>%
         filter(Confirmed > 50) %>%
         mutate(type = "Observed")
-
+    
     estDF <- tibble(
         Last_Update = seq(
             min(tmpDF$Last_Update),
             (max(tmpDF$Last_Update)+days(14)), by = "day")) %>%
-        mutate(date_estimate = 1:n() + round(tmpDF$day_hat[1])) %>%
-        mutate(Confirmed = exp_func(
-            log(c(tmpDF$day_hat[1], tmpDF$dt_hat[1])), date_estimate))
+        left_join(select(tmpDF, Last_Update, Prev_Day_Cases, Confirmed)) %>%
+        mutate(Prev_Day_Cases = lag(Confirmed))
+    
+    lsim <- exp(rnorm(sims, log(last(tmpDF$pct_inc)), last(tmpDF$dt_st_err)))
+    chat <- matrix(NA, nrow = nrow(estDF), ncol = sims)
+    
+    for(i in 2:nrow(estDF)){
+        if(!is.na(estDF$Prev_Day_Cases[i])){
+            chat[i,] <- estDF$Prev_Day_Cases[i] +
+                rnegbin(lsim, estDF$Prev_Day_Cases[i] * lsim, last(tmpDF$theta))
+        }
+        else{
+            chat[i,] <- chat[i-1,] +
+                rnegbin(lsim, chat[i-1,] * lsim, last(tmpDF$theta))
+        }
+    }
+    
+    estDF$Confirmed <- apply(chat, 1, median)
+    estDF$lwr <- apply(chat, 1, quantile, probs = .025, na.rm=T)
+    estDF$upr <- apply(chat, 1, quantile, probs = .975, na.rm=T)
 
     annotations <- tibble(
         xpos = min(estDF$Last_Update),
-        ypos = max(estDF$Confirmed),
-        annotateText = tmpDF$Notes[1],
+        ypos = max(estDF$upr, na.rm=T),
+        annotateText = last(tmpDF$Notes),
         hjustvar = c(0) ,
         vjustvar = c(1)) %>%
         mutate(annotateText = str_replace_all(annotateText, "<br>", "\n"))
@@ -116,6 +145,7 @@ for(j in unique(anlyzDF$Combined_Key)){
         geom_point() +
         theme_classic() +
         geom_line(data=estDF) +
+        geom_ribbon(aes(ymin = lwr, ymax = upr), data=estDF, alpha = .3) +
         geom_label(
             data=annotations,
             aes(x=xpos,y=ypos,label=annotateText,
@@ -129,11 +159,11 @@ for(j in unique(anlyzDF$Combined_Key)){
             axis.title = element_text(size=17),
             title =  element_text(size=20))
 
-    ggsave(tmpDF$fp[1], p1)
+    ggsave(last(tmpDF$fp), p1)
 
 }
 
-bins <- c(0,3,5,7,10,15,31)
+bins <- c(0,3,5,7,10,15,30)
 pal <- colorBin(
     palette = "Spectral", reverse=FALSE, 
     domain = c(0, max(anlyzDF$dt_hat)), bins = bins)
@@ -142,7 +172,7 @@ mapDF <- countyDF %>%
     left_join(anlyzDF, by = "GEOID") %>%
     filter(!is.na(dt_hat))
 
-mapDF %>%
+mapObj <- mapDF %>%
     leaflet() %>%
     addProviderTiles("CartoDB.Positron") %>%
     addPolygons(
@@ -164,4 +194,6 @@ mapDF %>%
             direction = "auto")) %>%
     addLegend("bottomleft", pal = pal, values = ~dt_hat, 
               title = "Estimated<br>Doubling Time", opacity = 1) %>%
-    addPopupImages(mapDF$fp, "n", width = 400, height = 400)
+    addPopupImages(mapDF$fp, "n", width = 600, height = 500)
+
+saveRDS(mapObj, "admin2-map/map.RDS")

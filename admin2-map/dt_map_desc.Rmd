@@ -1,0 +1,29 @@
+---
+output: 
+    html_document:
+        includes:
+            in_header: assets/huskyheader.html
+            before_body: assets/huskynavbar.html
+---
+
+# Modeling Covid Case Growth
+#### Neal Marquez
+
+
+Most of the information that we have seen regarding the covid-19 pandemic has focused on the total number of cases. However, an important measure to visualize is the growth rate of the pandemic and how locations differ in their spread of covid-19. By focusing on growth rate we can look at the places that may see large upticks in confirmed covid cases in the near future.
+
+In order to estimate the growth rate we use a simple model of growth which follows
+a negative binomial distribution shown below, estimating the growth rate of each county in the United States that has more than 100 confirmed cases. Data was taken from the Novel Coronavirus (COVID-19) Cases Database, provided by JHU CSSE.
+
+$$
+c = \text{county} \\
+t = \text{day} \\
+Y = \text{Confirmed Cases} \\
+\frac{\text{log}(2)}{\text{log}(1+\theta)} = \text{Doubling Rate} \\
+(Y_{c,t} - Y_{c,t-1}) \sim \text{NB}(Y_{c,t-1}  \theta_c, \phi_c) \\
+\boldsymbol{\text{E}}[Y_{c,t} - Y_{c,t-1}] = Y_{c,t-1} \theta_c \\
+\boldsymbol{\text{VAR}}[Y_{c,t} - Y_{c,t-1}] = Y_{c,t-1} \theta_c + \frac{(Y_{c,t-1} \theta_c)^2}{\phi_c}
+$$
+In the modeling process we estimate each set of counties parameters independently. The [interactive map](https://nmmarquez.twilightparadox.com/dt_map.html) shows the spatial variation in doubling time. We can see that locations differ tremendously in their doubling time. While part of this is likely due to the fact that doubling time declines as the number of cases in the county decreases, a fact that the current model ignores, even locations that have similar number of cases have wildly different growth rates. Locations in red and orange have high growth rates and will likely see abrupt changes in their total case numbers in the near future. It is likely that many counties have individualized projections of what their case number will look like in the near future however having a comparison point of locations against the growth rate of other counties helps to contextualize the situation.
+
+An additional advantage at estimating doubling rates is that it is easy to extrapolate estimates into the future. We include two week projections based on doubling rate estimates in the map object above when selecting a county. Note again that this assumes doubling rate is constant which for locations such as New York City, which have very high case rates, shows very unlikely projections. A full set of code used to run the analysis can be found [here](https://github.com/nmmarquez/COVID-code/blob/master/admin2-map/00_covid_exp_growth.R).
