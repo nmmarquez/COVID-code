@@ -7,14 +7,13 @@ library(tigris)
 library(sf)
 library(rmapshaper)
 library(leafpop)
-library(htmlwidgets)
-library(htmltools)
+library(TMB)
+library(ar.matrix)
 options(tigris_use_cache=TRUE)
 
 day_files <- list.files(
     "COVID-19/csse_covid_19_data/csse_covid_19_daily_reports",
     full.names = TRUE, pattern = "*.csv")
-
 
 convert_all_dates <- function(Date){
     # dates are usually space seperated and one of these two formats
@@ -56,62 +55,117 @@ countyDF <- counties(class = "sf") %>%
     st_as_sf() %>%
     st_transform("+proj=longlat +datum=WGS84")
 
-weight_func <- function(values, psi=1){
-    (length(values)*psi^values) / sum(psi^values)
-}
-
 # We want to limit ourselves to the locations that have over 100 cases
 # and only use time periods of 50+ cases as well as 3 time periods of 50+
 # cases
 anlyzDF <- DF %>%
     group_by(Province_State, Admin2) %>%
-    filter(any(Confirmed > 100) & Confirmed > 50) %>%
-    filter(n() > 7) %>% 
+    filter(any(Confirmed > 100) & Confirmed > 50 & (n() > 3)) %>%
     filter(!is.na(FIPS) & Admin2 != "Unassigned") %>%
     mutate(New_Cases = Confirmed - lag(Confirmed)) %>%
-    mutate(Prev_Day_Cases = lag(Confirmed), Day = 1:n()) %>%
-    mutate(W = weight_func(Day, 1.3)) %>%
+    mutate(Prev_Day_Cases = lag(Confirmed)) %>%
     mutate(New_Cases = ifelse(New_Cases < 0, NA, New_Cases)) %>%
-    mutate(model = list(
-        glm.nb(New_Cases ~ 1 + offset(log(Prev_Day_Cases)), weights = W))) %>%
-    mutate(pct_inc = exp(summary(model[[1]])$coefficients[1,1])) %>%
-    mutate(dt_st_err = summary(model[[1]])$coefficients[1,2]) %>%
-    mutate(dt_hat = log(2)/log(1+pct_inc)) %>%
-    mutate(theta = summary(model[[1]])$theta) %>%
-    mutate(SE.theta = summary(model[[1]])$SE.theta) %>%
-    filter(Last_Update == max(Last_Update)) %>%
-    mutate(Notes = paste0(
-        "Location: ", Combined_Key,
-        "<br>Estimated Double Time: ", round(dt_hat, 2),
-        " days<br>Confirmed: ", Confirmed,
-        "<br>Deaths: ", Deaths,
-        "<br>Recovered: ", Recovered)) %>%
-    filter(dt_hat<30) %>%
-    rename(GEOID = FIPS) %>%
-    mutate(
-        alpha =case_when(
-            Confirmed < 500 ~ .3,
-            Confirmed >= 500 & Confirmed < 1500 ~ .6,
-            TRUE ~ .9),
-        fp = paste0("admin2-map/plots/", Combined_Key, ".png"))
+    ungroup()
 
-redoDF <- DF %>%
+model_run <- function(DT, verbose = FALSE){
+    model <- "rw_model"
+    Data <- list(y=DT$Confirmed)
+    Params <- list(phi=rep(0, length(Data$y)+14), log_sigma=c(0))
+    dyn.load(dynlib(model))
+    Obj <- MakeADFun(data=Data, parameters=Params, DLL=model, random="phi",
+                     silent=!verbose)
+    Obj$env$tracemgc <- verbose
+    Obj$env$inner.control$trace <- verbose
+    Opt <- nlminb(start=Obj$par, objective=Obj$fn, 
+                                    gradient=Obj$gr,
+                                    control=list(eval.max=1e4, iter.max=1e4))
+    Report <- Obj$report()
+    Report$convergence <- Opt$convergence
+    sdrep <- sdreport(Obj, getJointPrecision = T)
+    Report$par.vals <- sdrep$par.random
+    ids <- which(row.names(sdrep$jointPrecision) == "phi")
+    Report$prec <- sdrep$jointPrecision[ids,ids]
+    dyn.unload(dynlib(model))
+    Report
+}
+
+N <- 1000
+
+for(j in unique(anlyzDF$Combined_Key)){
+    subDF <- anlyzDF %>%
+        filter(Combined_Key == j)
+    
+    subModel <- model_run(subDF)
+    
+    theta <- exp(t(ar.matrix::sim.AR(N, subModel$prec) + subModel$par.vals))
+    chat <- matrix(NA, nrow = nrow(theta), ncol = N)
+    
+    for(i in 2:nrow(chat)){
+        if((i-1) <= nrow(subDF) & !is.na(subDF$Prev_Day_Cases[i])){
+            chat[i,] <- subDF$Prev_Day_Cases[i] +
+                rpois(N, subDF$Prev_Day_Cases[i] * theta[i,])
+        }
+        else{
+            chat[i,] <- chat[i-1,] +
+                rpois(N, chat[i-1,] * exp(last(subModel$par.vals)))
+        }
+    }
+    
+    newDF <- tibble(Confirmed = NA, Last_Update = seq(
+            min(subDF$Last_Update),
+            (max(subDF$Last_Update)+days(14)), by = "day")) %>%
+        mutate(Confirmed = apply(chat, 1, median, na.rm = TRUE)) %>%
+        mutate(lwr = apply(chat, 1, quantile, probs = .025, na.rm = TRUE)) %>%
+        mutate(upr = apply(chat, 1, quantile, probs = .975, na.rm = TRUE))
+    
+    theta_ <- exp(last(subModel$par.vals))
+    
+    annotations <- tibble(
+        xpos = min(newDF$Last_Update),
+        ypos = max(newDF$upr, na.rm=T),
+        annotateText = paste0(
+            "Location: ", last(subDF$Combined_Key),
+            "<br>Estimated Double Time: ", round(log(2)/log(1+theta_), 2),
+            " days<br>Confirmed: ", last(subDF$Confirmed),
+            "<br>Deaths: ", last(subDF$Deaths),
+            "<br>Recovered: ", last(subDF$Recovered)),
+        hjustvar = c(0),
+        vjustvar = c(1)) %>%
+        mutate(annotateText = str_replace_all(annotateText, "<br>", "\n"))
+    
+    p1 <- ggplot(subDF, aes(x=Last_Update, y = Confirmed)) +
+        geom_point() +
+        theme_classic() +
+        geom_line(data=newDF) +
+        geom_ribbon(aes(ymin = lwr, ymax = upr), data=newDF, alpha = .3) +
+        geom_label(
+            data=annotations,
+            aes(x=xpos,y=ypos,label=annotateText,
+                vjust=vjustvar, hjust=hjustvar)) +
+        labs(x="Date", "Cases") +
+        scale_y_log10() +
+        theme(
+            legend.text = element_text(size=13),
+            legend.title = element_text(size=15),
+            axis.text = element_text(size=13),
+            axis.title = element_text(size=17),
+            title =  element_text(size=20))
+    
+    ggsave(last(subDF$fp), p1)
+}
+
+anlyzDF <- DF %>%
     group_by(Province_State, Admin2) %>%
-    filter(any(Confirmed > 100) & Confirmed > 50) %>%
-    filter(n() > 7) %>% 
+    filter(any(Confirmed > 100) & Confirmed > 50 & (n() > 3)) %>%
     filter(!is.na(FIPS) & Admin2 != "Unassigned") %>%
     mutate(New_Cases = Confirmed - lag(Confirmed)) %>%
-    mutate(Prev_Day_Cases = lag(Confirmed), Day = 1:n()) %>%
-    mutate(W = weight_func(Day, 1.1)) %>%
+    mutate(Prev_Day_Cases = lag(Confirmed)) %>%
     mutate(New_Cases = ifelse(New_Cases < 0, NA, New_Cases)) %>%
-    filter(Combined_Key %in% filter(anlyzDF, is.na(SE.theta))$Combined_Key) %>%
-    mutate(model = list(
-        glm.nb(New_Cases ~ 1 + offset(log(Prev_Day_Cases)), weights = W))) %>%
+    mutate(model = list(glm.nb(New_Cases ~ 1 + offset(log(Prev_Day_Cases))))) %>%
     mutate(pct_inc = exp(summary(model[[1]])$coefficients[1,1])) %>%
     mutate(dt_st_err = summary(model[[1]])$coefficients[1,2]) %>%
     mutate(dt_hat = log(2)/log(1+pct_inc)) %>%
     mutate(theta = summary(model[[1]])$theta) %>%
-    mutate(SE.theta = summary(model[[1]])$SE.theta) %>%
     filter(Last_Update == max(Last_Update)) %>%
     mutate(Notes = paste0(
         "Location: ", Combined_Key,
@@ -127,12 +181,8 @@ redoDF <- DF %>%
             Confirmed >= 500 & Confirmed < 1500 ~ .6,
             TRUE ~ .9),
         fp = paste0("admin2-map/plots/", Combined_Key, ".png"))
-
-anlyzDF <- bind_rows(anlyzDF, redoDF) %>%
-    filter(!is.na(SE.theta))
 
 sims <- 1000
-plot_list <- list()
 
 ### Make plots for popup
 for(j in unique(anlyzDF$Combined_Key)){
@@ -169,7 +219,7 @@ for(j in unique(anlyzDF$Combined_Key)){
     estDF$Confirmed <- apply(chat, 1, median)
     estDF$lwr <- apply(chat, 1, quantile, probs = .025, na.rm=T)
     estDF$upr <- apply(chat, 1, quantile, probs = .975, na.rm=T)
-
+    
     annotations <- tibble(
         xpos = min(estDF$Last_Update),
         ypos = max(estDF$upr, na.rm=T),
@@ -177,7 +227,7 @@ for(j in unique(anlyzDF$Combined_Key)){
         hjustvar = c(0) ,
         vjustvar = c(1)) %>%
         mutate(annotateText = str_replace_all(annotateText, "<br>", "\n"))
-
+    
     p1 <- ggplot(tmpDF, aes(x=Last_Update, y = Confirmed)) +
         geom_point() +
         theme_classic() +
@@ -188,18 +238,16 @@ for(j in unique(anlyzDF$Combined_Key)){
             aes(x=xpos,y=ypos,label=annotateText,
                 vjust=vjustvar, hjust=hjustvar)) +
         labs(x="Date", "Cases") +
-        #scale_y_log10() +
+        scale_y_log10() +
         theme(
             legend.text = element_text(size=13),
             legend.title = element_text(size=15),
             axis.text = element_text(size=13),
             axis.title = element_text(size=17),
             title =  element_text(size=20))
-
+    
     ggsave(last(tmpDF$fp), p1)
     
-    plot_list[[j]] <- p1
-
 }
 
 bins <- c(0,3,5,7,10,15,30)
@@ -211,14 +259,14 @@ mapDF <- countyDF %>%
     left_join(anlyzDF, by = "GEOID") %>%
     filter(!is.na(dt_hat))
 
-mapObj1 <- mapDF %>%
+mapObj <- mapDF %>%
     leaflet() %>%
     addProviderTiles("CartoDB.Positron") %>%
     addPolygons(
         group = "n",
         fillColor = ~pal(dt_hat),
         color = "#444444",
-        popup = ~Notes,
+        #popup = ~popupImage(fp, width = 500, height = 500),
         weight = 1,
         smoothFactor = 0.5,
         opacity = 1.,
@@ -232,55 +280,7 @@ mapObj1 <- mapDF %>%
             textsize = "15px",
             direction = "auto")) %>%
     addLegend("bottomleft", pal = pal, values = ~dt_hat, 
-              title = "Days Until<br>Cases Double", opacity = 1)
+              title = "Estimated<br>Doubling Time", opacity = 1) %>%
+    addPopupImages(mapDF$fp, "n", width = 600, height = 500)
 
-tag.map.title <- tags$style(HTML("
-  .leaflet-control.map-title { 
-    transform: translate(-50%,20%);
-    position: fixed !important;
-    left: 50%;
-    text-align: center;
-    padding-left: 10px; 
-    padding-right: 10px; 
-    background: rgba(255,255,255,0.75);
-    font-weight: bold;
-    font-size: 28px;
-  }
-"))
-
-title <- tags$div(
-    tag.map.title, HTML(paste0(
-        "Estimated Doubling Time<br>Last Updated: ", max(anlyzDF$Last_Update)))
-)  
-
-map_leaflet <- leaflet() %>%
-    addTiles() %>%
-    addControl(title, position = "top", className="map-title")
-
-mapObj2 <- mapDF %>%
-    leaflet() %>%
-    addProviderTiles("CartoDB.Positron") %>%
-    addPolygons(
-        group = "n",
-        fillColor = ~pal(dt_hat),
-        color = "#444444",
-        weight = 1,
-        smoothFactor = 0.5,
-        opacity = 1.,
-        fillOpacity = ~alpha,
-        highlightOptions = highlightOptions(
-            color = "white",
-            weight = 2,
-            bringToFront = TRUE),
-        labelOptions = labelOptions(
-            style = list("font-weight" = "normal", padding = "3px 8px"),
-            textsize = "15px",
-            direction = "auto")) %>%
-    addLegend("bottomleft", pal = pal, values = ~dt_hat, 
-              title = "Days Until<br>Cases Double", opacity = 1) %>%
-    addPopupImages(mapDF$fp, "n", width = 600, height = 500) %>%
-    addControl(title, position = "topright", className="map-title")
-
-saveRDS(mapObj2, "admin2-map/map.RDS")
-#saveRDS(mapObj1, "admin2-map/map-simple.RDS")
-#saveRDS(plot_list, "admin2-map/ts-plots.RDS")
+saveRDS(mapObj, "admin2-map/map.RDS")

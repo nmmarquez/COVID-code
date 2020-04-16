@@ -9,21 +9,76 @@ output:
 # Modeling Covid Case Growth
 #### Neal Marquez
 
+## Summary
 
-Most of the information that we have seen regarding the covid-19 pandemic has focused on the total number of cases. However, an important measure to visualize is the growth rate of the pandemic and how locations differ in their spread of covid-19. By focusing on growth rate we can look at the places that may see large upticks in confirmed covid cases in the near future.
+Most of the information that we have seen regarding the covid-19 pandemic has focused on the counts of the total number of cases, fatalities, or the fatality rate. However, an important measure to focus on for near term planning is the growth rate of the pandemic. By focusing on the growth rate localities can plan on how to deal with anticipated increases in case load as well as measures to slow the growth rate. While many counties likely have a public health group that provides near term forecasts of case load, an approach that models multiple locations adds a comparative framework to analyze the growth of the Covid-19 pandemic. In this report we build a simple model for calculating the growth rate of the Covid-19 pandemic within the United States at the county level using available time series data.
+
+## Introduction
+
+One of the aspects of the Covid 19 pandemic that has been strongly focused on is the exponential growth of the case loads. Another way of putting this is that doubling time for the cornavirus is assumed to be constant in a constant setting. This means the number of days that it takes to increase the number of active cases in a particular location say from 10 to 20 is the same as it takes to go from 10 to 20 thousand. The exponential growth of the coronavirus has been explored in a number of popular media [outlets](https://www.motherjones.com/kevin-drum/2020/03/ferguson-r0-for-coronavirus-is-probably-3-1/), however, exponential growth is a message that is difficult to convey and harder to imagine. The idea of doubling time seems somewhat more salient and translating the exponential curve to a message about doubling time has seen more recent prevalence in the [media](https://www.npr.org/sections/health-shots/2020/04/10/829167659/are-we-flattening-the-curve-states-keep-watch-on-coronavirus-doubling-times).
+
+The goal of this analysis is to model the exponential growth of the coronavirus at the county level across the United States and translate that estimate into a measure of doubling time. By focusing on doubling time we hope to convey the message that counties are experiencing vastly different rates of growth of the coronavirus and preparedness should not only be a function of the current case load but also the anticipated near future case load. Further more by modeling multiple counties we may make comparisons of which locations in the United States have slow growth vs those that have quick growth.
 
 In order to estimate the growth rate we use a simple model of growth which follows
-a negative binomial distribution shown below, estimating the growth rate of each county in the United States that has more than 100 confirmed cases. Data was taken from the Novel Coronavirus (COVID-19) Cases Database, provided by JHU CSSE.
+a negative binomial distribution shown below. The benefit of using this approach is it is relatively simple to take the expected value of day to day growth and translate this to an estimate of doubling time.  
 
 $$
 c = \text{county} \\
 t = \text{day} \\
 Y = \text{Confirmed Cases} \\
-\frac{\text{log}(2)}{\text{log}(1+\theta)} = \text{Doubling Rate} \\
+\frac{\text{log}(2)}{\text{log}(1+\theta)} = \text{Doubling Time} \\
 (Y_{c,t} - Y_{c,t-1}) \sim \text{NB}(Y_{c,t-1}  \theta_c, \phi_c) \\
 \boldsymbol{\text{E}}[Y_{c,t} - Y_{c,t-1}] = Y_{c,t-1} \theta_c \\
 \boldsymbol{\text{VAR}}[Y_{c,t} - Y_{c,t-1}] = Y_{c,t-1} \theta_c + \frac{(Y_{c,t-1} \theta_c)^2}{\phi_c}
 $$
-In the modeling process we estimate each set of counties parameters independently. The [interactive map](https://nmmarquez.twilightparadox.com/dt_map.html) shows the spatial variation in doubling time. We can see that locations differ tremendously in their doubling time. While part of this is likely due to the fact that doubling time declines as the number of cases in the county decreases, a fact that the current model ignores, even locations that have similar number of cases have wildly different growth rates. Locations in red and orange have high growth rates and will likely see abrupt changes in their total case numbers in the near future. It is likely that many counties have individualized projections of what their case number will look like in the near future however having a comparison point of locations against the growth rate of other counties helps to contextualize the situation.
 
-An additional advantage at estimating doubling rates is that it is easy to extrapolate estimates into the future. We include two week projections based on doubling rate estimates in the map object above when selecting a county. Note again that this assumes doubling rate is constant which for locations such as New York City, which have very high case rates, shows very unlikely projections. A full set of code used to run the analysis can be found [here](https://github.com/nmmarquez/COVID-code/blob/master/admin2-map/00_covid_exp_growth.R).
+Data for this analysis was pulled from the [Novel Coronavirus (COVID-19) Cases Database](https://github.com/CSSEGISandData/COVID-19), provided by Johns Hopkins University CSSE. Counties were modeled if they currently had over 100 cases and had over one week of observed days with more than 50 cases. Only days in which the case load was greater than 50 was considered for the analysis. We fit each set of parameters for each county independently using Maximum Likelihood Estimation (MLE). In the MLE fitting process we weight data such that data closer to the current data has a greater weight than data that is further from the current date. We do this as we expect that the doubling rate is likely changing and thus better reflected in more recent observations. The weighting function is as follows
+
+$$
+\frac{N \psi^i}{\sum_i^N \psi^i}
+$$
+
+where $N$ is the number of observation days for a county and $i$ is the number of days since the first observation of a case load greater than 50. We use a value of $1.3$ for $\psi$ or $1.1$ if the initial model does not converge. 
+
+A benefit of calculating the growth rate $\theta$, and thus doubling time, is that it is easy to translate this value into forecasts of the number of cases. For each county we take the observed cases and the doubling rate and forecast the expected number of future cases two weeks from the last observed case. A full set of code for this process can be found [here](https://github.com/nmmarquez/COVID-code/blob/master/admin2-map/00_covid_exp_growth.R).
+
+## Results
+
+The final results give us a comparison of the current estimates of county level doubling time of the Covid-19 pandemic. This model is being updated daily however this document is up to date as of April 14th. A link at the end of the document sens you to a map with model results that are being updated daily and thus should reflect the most recent data. Note that locations that have higher case counts, such as Los Angeles and New York City, have relative lower doubling times indicating as lowing down of the virus as case loads increase. This could be for a number of reasons including lower number of susceptible persons, increased social distancing as case counts increase in an area, or a lack of adequate tests for a given area as cases increase. 
+
+```{r message=FALSE, warning=FALSE,echo=FALSE}
+library(tidyverse)
+library(leaflet)
+library(sf)
+library(plotly)
+
+mapObj1 <- readRDS("./map-simple.RDS")
+plot_list <- readRDS("./ts-plots.RDS")
+mapObj1
+```
+
+Again we can take these doubling rates and apply them to near term forecasts. Let's take a look at Snohomish county in Washington. It has a relatively high case load, 1950 as of April 14th, at the county level however the growth of the case load has been slow over time with an estimated doubling time of nearly one month. A two week forecasts of the case load predicts relatively modest growth of the number of confirmed cases. The plot below shows the observed case load as the points and a forecast of future caseloads in a solid line. The bands represent the uncertainty of the modeling process in the form of 95% prediction intervals. 
+
+#### Snohomish, Washington, US
+```{r message=FALSE, warning=FALSE,echo=FALSE}
+ggplotly(plot_list$`Snohomish, Washington, US`)
+```
+
+On the other hand we have location such as Riverside, CA with a caseload of 1961 as of April 14th and yet has a much quicker doubling time of around 5 days. The projections below show an estimated case load of over 10,000 in two weeks from today. The estimated forecast for two weeks from now leads to a value 5 times higher than the current observed rate and will put Riverside among the hardest hit in the United States. This forecast, however, is not a foregone conclusion, it assumes that the doubling time will remain constant and we know that a number of factors, including behavioral intervention, can alter this. 
+
+#### Riverside, California, US
+```{r message=FALSE, warning=FALSE,echo=FALSE}
+ggplotly(plot_list$`Riverside, California, US`)
+```
+
+Though these locations have very similar case counts, their projected growth and estimated doubling rates indicate that each county is potentially in a very different situation in terms of containing the spread of the virus. 
+
+## Limitations
+
+Case count is a difficult metric to measure accurately. The models above are built on an assumption that there is consistent testing in a county overtime which is unlikely to be true. Furthermore, comparisons are made assuming the test are equally available to the population across the time series of the two counties. These estimates of doubling time should not be taken as absolute but should help to ask further questions of why the data we observe is such. By focusing on doubling rate and not case count we hope to shift the discussion to preparedness rather than reaction and better help counties guide their future decision making. Again, all of this is predicated on testing being widely available which is often not the case. Increases in testing availability will greatly improve estimates like this and make county level results of growth and case counts more comparable.
+
+## Conclusion
+
+We show that measured case counts across counties in the US vary widely in their growth rate. These estimates are limited by their assumption of equal testing availability across counties. Future studies should look to improve models such as this by accounting for the under count in cases. A full set of near term forecasts can be found at the link below in an enhanced version of the map by clicking on the county of interest.
+
+[Full Time Series Map](https://nmmarquez.twilightparadox.com/dt_map.html)
