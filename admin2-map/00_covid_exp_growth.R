@@ -251,11 +251,7 @@ tag.map.title <- tags$style(HTML("
 title <- tags$div(
     tag.map.title, HTML(paste0(
         "Estimated Doubling Time<br>Last Updated: ", max(anlyzDF$Last_Update)))
-)  
-
-map_leaflet <- leaflet() %>%
-    addTiles() %>%
-    addControl(title, position = "top", className="map-title")
+)
 
 mapObj2 <- mapDF %>%
     leaflet() %>%
@@ -279,7 +275,7 @@ mapObj2 <- mapDF %>%
     addLegend("bottomleft", pal = pal, values = ~dt_hat, 
               title = "Days Until<br>Cases Double", opacity = 1) %>%
     addPopupImages(mapDF$fp, "n", width = 600, height = 500) %>%
-    addControl(title, position = "topright", className="map-title")
+    addControl(title, position = "bottomleft", className="map-title")
 
 saveRDS(mapObj2, "admin2-map/map.RDS")
 #saveRDS(mapObj1, "admin2-map/map-simple.RDS")
